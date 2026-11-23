@@ -112,7 +112,7 @@ function renderBoard(state) {
   <section class="hero">
     <h1>Every protocol still waiting on a token,<br>ranked by <span class="hl">what that token would be worth</span>.</h1>
     <p>The radar scans the sealed DefiLlama snapshot of ${esc(D.as_of)} — ${D.scanned} protocols — prices each one that records
-    no token yet with the market's own category multiples, and writes the farm plan beside the price.
+    no token yet with the market's own category multiples — each price carrying the peer band around it — and writes the farm plan beside the price.
     Protocols whose token already trades are <a href="#/live">kept apart</a>; they are the comparables, never the ranked.</p>
     <div class="stats">
       <div class="stat"><div class="k">Protocols scanned</div><div class="v">${D.scanned}</div></div>
@@ -136,11 +136,12 @@ function renderBoard(state) {
     <span class="count"><b>${rows.length}</b> of ${D.board_size} shown</span>
   </form>`;
 
+  const thSort = (key, label, cls = '') => `<th class="${cls} sortable" data-sort="${key}" title="Sort by ${esc(label)}">${label}${state.sort === key ? ' <span class="sarr">▾</span>' : ''}</th>`;
   const body = rows.length === 0
     ? `<div class="empty">No pre-token protocol matches that filter. Loosen it — the radar ranks ${D.board_size} of them.</div>`
     : `<table class="board"><thead><tr>
         <th class="l">#</th><th class="l">Protocol</th><th class="l hideS">Category</th><th class="l hideS">Chains</th>
-        <th>TVL</th><th>7d</th><th>Age</th><th>Implied value</th><th class="hideS">× TVL</th><th>Conviction</th>
+        ${thSort('tvl', 'TVL')}${thSort('growth', '7d')}${thSort('age', 'Age')}${thSort('value', 'Implied value')}<th class="hideS">× TVL</th>${thSort('conviction', 'Conviction')}
       </tr></thead><tbody>${rows.map((r) => `
       <tr data-slug="${esc(r.slug)}"${r.rank <= 3 ? ' class="top1"' : ''}>
         <td class="l rank">${r.rank}</td>
@@ -150,7 +151,7 @@ function renderBoard(state) {
         <td>${fmtUsd(r.tvl_usd)}</td>
         <td>${fmtPct(r.change_7d)}</td>
         <td>${fmtAge(r.age_days)}</td>
-        <td><strong>${fmtUsd(r.implied_value_usd)}</strong></td>
+        <td><strong>${fmtUsd(r.implied_value_usd)}</strong><span class="range">${fmtUsd(r.model.implied_low_usd)} – ${fmtUsd(r.model.implied_high_usd)}</span></td>
         <td class="hideS">${mult(r.implied_value_usd / r.tvl_usd)}</td>
         <td><span class="conv"><i style="width:${r.model.conviction}%"></i></span>${r.model.conviction}</td>
       </tr>`).join('')}</tbody></table>`;
@@ -173,6 +174,11 @@ function renderBoard(state) {
   app.querySelectorAll('tr[data-slug]').forEach((tr) => {
     tr.addEventListener('click', () => { location.hash = `#/p/${encodeURIComponent(tr.dataset.slug)}`; });
   });
+  app.querySelectorAll('th[data-sort]').forEach((th) => {
+    th.addEventListener('click', () => {
+      location.hash = boardHash({ q: state.q, cat: state.cat, chain: state.chain, watch: state.watch, sort: th.dataset.sort });
+    });
+  });
 }
 
 /* ---------------- detail ---------------- */
@@ -185,6 +191,12 @@ function renderDetail(slug) {
   const peers = m.comp_peers > 0
     ? `${m.comp_peers} live ${esc(r.category || '')} peers, median ${m.comp_median_multiple !== null ? mult(m.comp_median_multiple) : '—'}`
     : 'no live peers in its category — priced on the global median';
+  const peerEntry = (D.peers || []).find((c) => (c.category || null) === (r.category || null));
+  const peerRows = peerEntry ? peerEntry.peers : D.global_peers;
+  const peerScope = peerEntry ? `the largest live ${esc(r.category || 'Uncategorised')} peers` : 'no live peers in its category — the global set that prices it';
+  const bandLo = Math.log(m.implied_low_usd / 1.2);
+  const bandHi = Math.log(m.implied_high_usd * 1.2);
+  const bandPos = (v) => (((Math.log(v) - bandLo) / (bandHi - bandLo)) * 100).toFixed(1);
   app.innerHTML = `
   <a class="back" href="#/">← back to the board</a>
   <div class="detail-head">
@@ -194,7 +206,7 @@ function renderDetail(slug) {
   <p class="detail-sub">Rank #${r.rank} of ${D.board_size} pre-token protocols · ${esc(r.category || 'Uncategorised')} · ${esc(r.chains.join(', ') || 'no chains recorded')} ·
   records no token in the ${esc(D.as_of)} snapshot — which is a statement about the record, not proof none exists.</p>
   <div class="tiles">
-    <div class="stat"><div class="k">Implied value</div><div class="v">${fmtUsd(r.implied_value_usd)}</div></div>
+    <div class="stat"><div class="k">Implied value</div><div class="v">${fmtUsd(r.implied_value_usd)}</div><div class="sub">peer band ${fmtUsd(m.implied_low_usd)} – ${fmtUsd(m.implied_high_usd)}</div></div>
     <div class="stat"><div class="k">TVL</div><div class="v">${fmtUsd(r.tvl_usd)}</div></div>
     <div class="stat"><div class="k">TVL change, 7d</div><div class="v">${fmtPct(r.change_7d)}</div></div>
     <div class="stat"><div class="k">Conviction</div><div class="v">${m.conviction}<small> / 100</small></div></div>
@@ -208,14 +220,30 @@ function renderDetail(slug) {
       <tr><td>Growth factor — 7d TVL change of ${Number(m.growth_pct).toFixed(1)}% mapped at weight ${D.model.growth_weight}</td><td class="num">× ${m.growth_factor.toFixed(2)}</td></tr>
       <tr><td>Track factor — tracked ${r.age_days === null ? 'an unknown time (scored as 300 days)' : `${r.age_days} days`} with no token</td><td class="num">× ${m.track_factor.toFixed(2)}</td></tr>
       <tr class="total"><td>Implied value if it launched on this record</td><td class="num">${fmtUsd(r.implied_value_usd)}</td></tr>
+      <tr><td>At the same peers' lower quartile instead (× ${mult(m.multiple_low)})</td><td class="num">${fmtUsd(m.implied_low_usd)}</td></tr>
+      <tr><td>At the same peers' upper quartile instead (× ${mult(m.multiple_high)})</td><td class="num">${fmtUsd(m.implied_high_usd)}</td></tr>
     </table>
+    <div class="band" aria-hidden="true"><span class="band-track"><i class="band-fill" style="left:${bandPos(m.implied_low_usd)}%;width:${Math.max(0, bandPos(m.implied_high_usd) - bandPos(m.implied_low_usd)).toFixed(1)}%"></i><i class="band-dot" style="left:${bandPos(r.implied_value_usd)}%"></i></span><span class="band-labs"><span>${fmtUsd(m.implied_low_usd)} · lower quartile</span><span>point ${fmtUsd(r.implied_value_usd)}</span><span>upper quartile · ${fmtUsd(m.implied_high_usd)}</span></span></div>
     <p class="note">Every figure comes from the snapshot itself; no protocol's name is looked up anywhere in the model.
+    The band is the peers' own spread — the interquartile range of their market cap over TVL, shrunk and clamped exactly
+    as the point multiple is — so a category whose peers disagree shows a wide band, and the point value stays the median's claim.
     The same three factors price all ${D.board_size} rows — read the whole model on the <a href="#/method">Method page</a>.</p>
   </section>
   <section class="panel">
+    <h2>The peers behind the multiple — ${peerScope}</h2>
+    <table class="comps"><thead><tr><th class="l">Live peer</th><th>Market cap</th><th>TVL</th><th>Mcap / TVL</th></tr></thead>
+    <tbody>${peerRows.map((pp) => `<tr><td class="l">${esc(pp.name)}<span class="slug">${esc(pp.slug)}</span></td><td>${fmtUsd(pp.mcap_usd)}</td><td>${fmtUsd(pp.tvl_usd)}</td><td>${mult(pp.mcap_tvl)}</td></tr>`).join('')}</tbody></table>
+    <p class="note">${m.comp_peers > 0
+      ? `The five largest of the ${m.comp_peers} live peers in this category by market cap. The multiple above is the whole set's median, shrunk toward the global median — never these five alone.`
+      : `This category has no live peer in the snapshot, so the global median over ${D.global_comp.peers} peers prices it; these are that set's largest members.`}</p>
+  </section>
+  <section class="panel">
     <h2>The farm plan — ${r.farm_steps.length} steps</h2>
+    <p class="plansum">All-in estimate: <b>${fmtUsd(m.plan.capital_usd)}</b> of working capital · about <b>${fmtUsd(m.plan.est_gas_total_usd)}</b> of gas in total
+    over ${m.plan.weeks} weeks at $${m.plan.gas_usd.toFixed(2)} a transaction on ${esc(r.chains[0] || 'its first chain')} · about <b>${m.plan.est_minutes} minutes</b> of hands-on time.</p>
     <ol class="steps">${r.farm_steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
     <p class="note">Costs are the plan's own estimates in dollars and minutes, sized to this protocol's TVL and its first chain.
+    One step weighs the risks this protocol's own record shows — its drawdown, its age, its chains.
     A launch is never promised: the plan buys a position in the protocol's own scoring, nothing more.</p>
   </section>`;
   app.setAttribute('aria-busy', 'false');
@@ -267,6 +295,11 @@ function renderMethod() {
       [${M.multiple_min}, ${M.multiple_max}], so a two-peer category cannot shout down a forty-peer one and no thin
       category prices a protocol at 400× its TVL. A category with no live peers is priced on the global median,
       <span class="kv">${mult(D.global_comp.multiple)}</span> over ${D.global_comp.peers} peers.</p>
+      <p><b>The band.</b> No category's peers agree on a single multiple, so every value carries their spread with it:
+      the category's 25th and 75th percentile market cap / TVL, each shrunk toward the matching global quartile by the
+      same peer weight and clamped to the same [${M.multiple_min}, ${M.multiple_max}]. Each detail view prices its protocol
+      at both quartiles beside the point value. A narrow band is a category whose peers cluster; a wide one is the model
+      showing how far its own evidence reaches — thin categories and clamped ones say so in the width.</p>
       <p><b>Growth factor.</b> <span class="kv">1 + clamp(7d TVL change, ${M.growth_floor_pct}%, +${M.growth_cap_pct}%) × ${M.growth_weight}</span>:
       a protocol that doubled its TVL in a week is marked up 1.60×, one that halved marked down to 0.70×. Momentum is evidence, not proof.</p>
       <p><b>Track factor.</b> <span class="kv">${M.track_base} + ${M.track_span} × age / (age + ${M.track_half_days} days)</span>, age counted from the day
@@ -279,10 +312,21 @@ function renderMethod() {
       unchanged record — not a prediction that a token will launch, or when.</p>
     </div>
     <div class="panel">
+      <h2>A worked example — the board's #1, priced in full</h2>
+      ${(() => { const ex = D.rows[0]; const em = ex.model; return `<p><b>${esc(ex.name)}</b> (${esc(ex.category || 'Uncategorised')}) holds ${fmtUsd(ex.tvl_usd)} of TVL.
+      Its category's live peers price at a median ${em.comp_median_multiple !== null ? mult(em.comp_median_multiple) : '—'}, shrunk to the multiple used, × ${mult(em.comp_multiple)};
+      its seven-day change of ${Number(em.growth_pct).toFixed(1)}% gives a growth factor of × ${em.growth_factor.toFixed(2)}, and its
+      ${ex.age_days === null ? 'unknown' : `${ex.age_days}-day`} track record a track factor of × ${em.track_factor.toFixed(2)}.
+      ${fmtUsd(ex.tvl_usd)} × ${mult(em.comp_multiple)} × ${em.growth_factor.toFixed(2)} × ${em.track_factor.toFixed(2)} = <b>${fmtUsd(ex.implied_value_usd)}</b>,
+      with the quartile band running from ${fmtUsd(em.implied_low_usd)} to ${fmtUsd(em.implied_high_usd)}.
+      Its farm plan asks for ${fmtUsd(em.plan.capital_usd)} of working capital, about ${fmtUsd(em.plan.est_gas_total_usd)} of gas and
+      ${em.plan.weeks} weeks of weekly activity. Every other row is priced by the same arithmetic — open any row to see its own.</p>`; })()}
+    </div>
+    <div class="panel">
       <h2>The comparables — live peers by category</h2>
-      <table class="comps"><thead><tr><th class="l">Category</th><th>Live peers</th><th>Median mcap / TVL</th><th>Multiple used</th></tr></thead>
-      <tbody>${D.comps.map((c) => `<tr><td class="l">${esc(c.category || 'Uncategorised')}</td><td>${c.peers}</td><td>${c.median_multiple !== null ? mult(c.median_multiple) : '—'}</td><td>${mult(c.multiple)}</td></tr>`).join('')}
-      <tr><td class="l"><b>All categories (global)</b></td><td>${D.global_comp.peers}</td><td>${mult(D.global_comp.median_multiple)}</td><td>${mult(D.global_comp.multiple)}</td></tr>
+      <table class="comps"><thead><tr><th class="l">Category</th><th>Live peers</th><th>Median mcap / TVL</th><th>Multiple used</th><th>Band P25 – P75</th></tr></thead>
+      <tbody>${D.comps.map((c) => `<tr><td class="l">${esc(c.category || 'Uncategorised')}</td><td>${c.peers}</td><td>${c.median_multiple !== null ? mult(c.median_multiple) : '—'}</td><td>${mult(c.multiple)}</td><td>${mult(c.p25_multiple)} – ${mult(c.p75_multiple)}</td></tr>`).join('')}
+      <tr><td class="l"><b>All categories (global)</b></td><td>${D.global_comp.peers}</td><td>${mult(D.global_comp.median_multiple)}</td><td>${mult(D.global_comp.multiple)}</td><td>${mult(D.global_comp.p25_multiple)} – ${mult(D.global_comp.p75_multiple)}</td></tr>
       </tbody></table>
     </div>
     <div class="panel">
@@ -290,8 +334,11 @@ function renderMethod() {
       <p>Each row's plan is generated from that protocol's own record — its category picks the playbook (supply and borrow
       for lending, liquidity for a DEX, routes for a bridge, stake and restake for staking), its first chain sets the gas
       figures, its TVL sizes the working capital, and its age sets how many weeks of weekly activity the plan asks for.
-      Every step states its cost and its time. No plan is a promise of an airdrop; each buys a genuine position in the
-      protocol's own activity record, which is the only thing a launch can later score.</p>
+      Every step states its cost and its time. One step in every plan weighs the risk that protocol's own record shows —
+      a seven-day drawdown of 15% or more first, then a track record under 180 days, then a single chain — and each
+      detail view totals the plan's gas and minutes beside its steps, computed from the same figures. No plan is a
+      promise of an airdrop; each buys a genuine position in the protocol's own activity record, which is the only
+      thing a launch can later score.</p>
     </div>
   </section>`;
   app.setAttribute('aria-busy', 'false');

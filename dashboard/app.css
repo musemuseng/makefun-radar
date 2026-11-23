@@ -37,6 +37,7 @@ main{max-width:1240px;margin:0 auto;padding:22px 22px 30px}
 .stat .k{color:var(--faint);font-size:11px;letter-spacing:.09em;text-transform:uppercase}
 .stat .v{font-family:var(--mono);font-size:21px;margin-top:3px;color:var(--ink)}
 .stat .v small{font-size:12px;color:var(--muted)}
+.stat .sub{color:var(--faint);font-size:11.5px;font-family:var(--mono);margin-top:2px}
 
 /* controls */
 .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px}
@@ -53,6 +54,10 @@ table.board th.l,table.board td.l{text-align:left}
 table.board td{padding:9px 9px;border-bottom:1px solid rgba(28,42,64,.55);text-align:right;font-family:var(--mono);font-size:12.5px;white-space:nowrap}
 table.board tbody tr{cursor:pointer}
 table.board tbody tr:hover{background:rgba(45,212,191,.05)}
+table.board th.sortable{cursor:pointer}
+table.board th.sortable:hover{color:var(--ink)}
+table.board th .sarr{color:var(--teal)}
+table.board td .range{display:block;color:var(--faint);font-size:11px;margin-top:1px}
 table.board td.name{font-family:var(--sans);font-size:13px;color:var(--ink);max-width:295px;overflow:hidden;text-overflow:ellipsis}
 table.board td.chains{max-width:185px;overflow:hidden;text-overflow:ellipsis}
 table.board td.name .slug{color:var(--faint);font-family:var(--mono);font-size:11.5px;margin-left:7px}
@@ -82,6 +87,14 @@ table.math td{padding:7px 4px;border-bottom:1px dashed rgba(39,57,90,.6)}
 table.math td.num{text-align:right;font-family:var(--mono)}
 table.math tr.total td{border-bottom:none;font-size:16px;color:var(--teal)}
 .formula{font-family:var(--mono);font-size:12.5px;color:var(--muted);background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:0 0 12px;overflow-x:auto;white-space:nowrap}
+.band{margin:14px 0 2px}
+.band-track{position:relative;display:block;height:8px;background:var(--bg2);border:1px solid var(--line);border-radius:4px}
+.band-fill{position:absolute;top:0;bottom:0;background:rgba(45,212,191,.28);border-radius:4px}
+.band-dot{position:absolute;top:-3px;width:2px;height:12px;background:var(--teal)}
+.band-labs{display:flex;justify-content:space-between;gap:8px;color:var(--faint);font-size:11px;font-family:var(--mono);margin-top:5px}
+.plansum{background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;color:var(--muted);margin:0 0 14px}
+.plansum b{color:var(--ink)}
+table.comps td .slug{color:var(--faint);font-family:var(--mono);font-size:11.5px;margin-left:7px}
 ol.steps{margin:0;padding-left:22px}
 ol.steps li{margin-bottom:11px;color:var(--ink)}
 ol.steps li::marker{color:var(--teal);font-family:var(--mono)}
