@@ -29,6 +29,19 @@
 // A conviction score (0-100) rides beside the value for the reader's eye only:
 // TVL scale, 7-day momentum, track record, chain breadth and watchlist
 // membership. It never changes a rank: rank is implied value, nothing else.
+//
+// Every value also carries a range, priced off the same peer set: the
+// category's interquartile band of live mcap / TVL (its 25th and 75th
+// percentiles), shrunk toward the global quartiles by the same peer weight
+// and clamped to the same [0.03, 2.5]. The point value is the median's claim;
+// the range is what the peers' own spread says around it, so a thin or
+// divided category shows a wide band and a deep, agreed one a narrow band.
+//
+// Each farm plan states its own totals — working capital, estimated gas over
+// the whole plan and hands-on minutes, computed from the same figures its
+// steps carry — and one of its steps is a risk step read off the protocol's
+// own record: a seven-day drawdown first, then a short track record, then
+// single-chain exposure, then the standing risks that apply to every farm.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -53,7 +66,7 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-export const MODEL_VERSION = 'comps-2';
+export const MODEL_VERSION = 'comps-3';
 
 /** The model's constants, stated in the dashboard's Method view. */
 export const MODEL = {
@@ -124,12 +137,24 @@ function median(values: number[]): number {
   return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
-/** One category's comparable set: how many live peers, their median multiple, and the shrunk multiple used. */
+/** A percentile of an already-sorted list, linearly interpolated between the two nearest ranks. */
+function percentile(sorted: number[], q: number): number {
+  if (sorted.length === 0) return 0;
+  if (sorted.length === 1) return sorted[0]!;
+  const at = (sorted.length - 1) * q;
+  const lo = Math.floor(at);
+  const hi = Math.ceil(at);
+  return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (at - lo);
+}
+
+/** One category's comparable set: how many live peers, their median multiple, the shrunk multiple used, and the shrunk quartile band the value's range is priced at. */
 export interface CompStat {
   category: string | null;
   peers: number;
   median_multiple: number | null;
   multiple: number;
+  p25_multiple: number;
+  p75_multiple: number;
 }
 
 /** The comparables: live-token protocols' market cap over TVL, by category, shrunk toward the global median. */
@@ -145,27 +170,86 @@ export function buildComps(snapshot: Snapshot): { byCategory: Map<string | null,
     perCategory.set(p.category, list);
   }
   const globalMedian = ratios.length > 0 ? median(ratios) : 0.2;
+  const sortedGlobal = [...ratios].sort((a, b) => a - b);
+  const globalP25 = ratios.length > 0 ? percentile(sortedGlobal, 0.25) : globalMedian;
+  const globalP75 = ratios.length > 0 ? percentile(sortedGlobal, 0.75) : globalMedian;
+  const shrinkTo = (raw: number, n: number, target: number): number =>
+    clamp((n * raw + MODEL.shrink_peers * target) / (n + MODEL.shrink_peers), MODEL.multiple_min, MODEL.multiple_max);
   const shrink = (catMedian: number | null, n: number): number => {
     if (catMedian === null) return clamp(globalMedian, MODEL.multiple_min, MODEL.multiple_max);
-    return clamp((n * catMedian + MODEL.shrink_peers * globalMedian) / (n + MODEL.shrink_peers), MODEL.multiple_min, MODEL.multiple_max);
+    return shrinkTo(catMedian, n, globalMedian);
   };
   const byCategory = new Map<string | null, CompStat>();
   for (const [category, list] of perCategory) {
     const med = median(list);
-    byCategory.set(category, { category, peers: list.length, median_multiple: round4(med), multiple: round4(shrink(med, list.length)) });
+    const sorted = [...list].sort((a, b) => a - b);
+    const multiple = round4(shrink(med, list.length));
+    const lo = Math.min(round4(shrinkTo(percentile(sorted, 0.25), list.length, globalP25)), multiple);
+    const hi = Math.max(round4(shrinkTo(percentile(sorted, 0.75), list.length, globalP75)), multiple);
+    byCategory.set(category, { category, peers: list.length, median_multiple: round4(med), multiple, p25_multiple: lo, p75_multiple: hi });
   }
-  const global: CompStat = { category: null, peers: ratios.length, median_multiple: round4(globalMedian), multiple: round4(shrink(null, ratios.length)) };
+  const global: CompStat = {
+    category: null,
+    peers: ratios.length,
+    median_multiple: round4(globalMedian),
+    multiple: round4(shrink(null, ratios.length)),
+    p25_multiple: round4(clamp(globalP25, MODEL.multiple_min, MODEL.multiple_max)),
+    p75_multiple: round4(clamp(globalP75, MODEL.multiple_min, MODEL.multiple_max)),
+  };
   return { byCategory, global };
 }
 
 /** The comp multiple one protocol is priced with, and the peer set behind it. */
 function compFor(p: SnapshotProtocol, comps: { byCategory: Map<string | null, CompStat>; global: CompStat }): CompStat {
-  return comps.byCategory.get(p.category) ?? { category: p.category, peers: 0, median_multiple: null, multiple: comps.global.multiple };
+  return comps.byCategory.get(p.category) ?? {
+    category: p.category,
+    peers: 0,
+    median_multiple: null,
+    multiple: comps.global.multiple,
+    p25_multiple: comps.global.p25_multiple,
+    p75_multiple: comps.global.p75_multiple,
+  };
+}
+
+/** One live peer named as evidence: the largest live protocols of a category, with the ratio each contributes. */
+export interface PeerSample {
+  slug: string;
+  name: string;
+  mcap_usd: number;
+  tvl_usd: number;
+  mcap_tvl: number;
+}
+
+/** The named peer evidence for one category, largest first. */
+export interface CategoryPeers {
+  category: string | null;
+  peers: PeerSample[];
+}
+
+/** The largest live peers of every category, and of the whole snapshot: the evidence the multiples rest on, named. */
+export function buildPeerSamples(snapshot: Snapshot): { byCategory: CategoryPeers[]; global: PeerSample[] } {
+  const live = snapshot.protocols.filter((p) => !recordsNoToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+  const sample = (list: SnapshotProtocol[]): PeerSample[] =>
+    [...list]
+      .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || (a.slug < b.slug ? -1 : 1))
+      .slice(0, 5)
+      .map((p) => ({ slug: p.slug, name: p.name, mcap_usd: p.mcap_usd!, tvl_usd: p.tvl_usd, mcap_tvl: round4(p.mcap_usd! / p.tvl_usd) }));
+  const groups = new Map<string | null, SnapshotProtocol[]>();
+  for (const p of live) {
+    const list = groups.get(p.category) ?? [];
+    list.push(p);
+    groups.set(p.category, list);
+  }
+  return { byCategory: [...groups.entries()].map(([category, list]) => ({ category, peers: sample(list) })), global: sample(live) };
 }
 
 /** The model's three factors and the implied value for one protocol. */
 export interface Valuation {
   implied_value_usd: number;
+  implied_low_usd: number;
+  implied_high_usd: number;
+  multiple_low: number;
+  multiple_high: number;
   comp_multiple: number;
   comp_peers: number;
   comp_median: number | null;
@@ -184,6 +268,8 @@ export function valueProtocol(p: SnapshotProtocol, snapshot: Snapshot, comps: { 
   const ageForTrack = age ?? MODEL.unknown_age_days;
   const trackFactor = MODEL.track_base + MODEL.track_span * (ageForTrack / (ageForTrack + MODEL.track_half_days));
   const implied = Math.max(1, Math.round(p.tvl_usd * comp.multiple * growthFactor * trackFactor));
+  const impliedLow = Math.min(implied, Math.max(1, Math.round(p.tvl_usd * comp.p25_multiple * growthFactor * trackFactor)));
+  const impliedHigh = Math.max(implied, Math.round(p.tvl_usd * comp.p75_multiple * growthFactor * trackFactor));
 
   // Conviction, for the reader's eye only: scale, momentum, track record, breadth, watchlist.
   const scale = 34 * clamp(Math.log10(Math.max(p.tvl_usd, 1) / 5_000_000) / 3, 0, 1);
@@ -195,6 +281,10 @@ export function valueProtocol(p: SnapshotProtocol, snapshot: Snapshot, comps: { 
 
   return {
     implied_value_usd: implied,
+    implied_low_usd: impliedLow,
+    implied_high_usd: impliedHigh,
+    multiple_low: comp.p25_multiple,
+    multiple_high: comp.p75_multiple,
     comp_multiple: comp.multiple,
     comp_peers: comp.peers,
     comp_median: comp.median_multiple,
@@ -218,6 +308,11 @@ const GAS_USD: Record<string, number> = {
   Starknet: 0.15, Near: 0.02, Cosmos: 0.05, Sei: 0.02, Sonic: 0.03, Berachain: 0.1,
   Monad: 0.05, Hyperliquid: 0.05, Eclipse: 0.05, Fuel: 0.05, Movement: 0.05,
 };
+
+/** One ordinary transaction's cost on a chain in dollars; chains the table does not name are priced at $0.50. */
+function gasUsdFor(chain: string): number {
+  return GAS_USD[chain] ?? 0.5;
+}
 
 function gasFor(chain: string): string {
   const g = GAS_USD[chain];
@@ -244,6 +339,47 @@ function weeksFor(age: number | null): number {
   if (age < 365) return 6;
   if (age < 730) return 5;
   return 4;
+}
+
+/** A plan's totals, computed from the same figures its steps state, so the reader sees the whole cost at a glance. */
+export interface PlanSummary {
+  weeks: number;
+  capital_usd: number;
+  gas_usd: number;
+  est_gas_total_usd: number;
+  est_minutes: number;
+}
+
+export function planSummary(p: SnapshotProtocol, age: number | null): PlanSummary {
+  const gas = gasUsdFor(firstChain(p));
+  const weeks = weeksFor(age);
+  // Gas actions: funding in, the playbook's open, its second action, one a week, and the exit — weeks + 4.
+  // Minutes: setup 10, funding 15, open 20, second 15, ten a week of activity plus five of diary, exit 20,
+  // and the risk step's own time — five a week while a drawdown is watched, a one-off five or ten otherwise.
+  const g = p.change_7d;
+  const riskMinutes = g !== null && g <= -15 ? 5 * weeks : age !== null && age < 180 ? 5 : p.chains.length <= 1 ? 5 : 10;
+  return {
+    weeks,
+    capital_usd: capitalFor(p.tvl_usd),
+    gas_usd: gas,
+    est_gas_total_usd: Math.round(gas * (weeks + 4) * 100) / 100,
+    est_minutes: 80 + 15 * weeks + riskMinutes,
+  };
+}
+
+/** The plan's risk step, read off the protocol's own record: a seven-day drawdown first, then youth, then a single chain. */
+function riskStep(p: SnapshotProtocol, age: number | null): string {
+  const g = p.change_7d;
+  if (g !== null && g <= -15) {
+    return `Weigh the drawdown before adding more: ${p.name}'s TVL fell ${Math.abs(g).toFixed(1)}% in the seven days to the snapshot, so keep to the capital above and add nothing until two weekly checks in a row show TVL flat or rising again. Cost: nothing. Time: 5 minutes a week.`;
+  }
+  if (age !== null && age < 180) {
+    return `Weigh the short record: DefiLlama has tracked ${p.name} for only ${age} days, so little history stands behind its TVL; keep to the capital above, spread nothing across extra wallets, and re-read its TVL monthly before adding. Cost: nothing. Time: 5 minutes a month.`;
+  }
+  if (p.chains.length <= 1) {
+    return `Weigh the single-chain risk: ${p.name} runs on ${firstChain(p)} alone, so a halt, exploit or outage there touches the whole position; keep to the capital above and never borrow against the position to add more. Cost: nothing. Time: 5 minutes to note the exposure in the diary.`;
+  }
+  return `Weigh the standing risks: ${p.name} has promised no token and may never launch, points can be diluted by later farmers, and the position carries ordinary smart-contract risk; the capital above is sized so that a total loss is survivable. Cost: nothing. Time: 10 minutes to re-read this before the first deposit.`;
 }
 
 type Playbook = { open: (n: string, c: string, cap: number) => string; second: (n: string, c: string, cap: number) => string };
@@ -317,10 +453,11 @@ function playbookFor(category: string | null): Playbook {
 }
 
 /**
- * One protocol's farm plan: seven steps, each a concrete action carrying its
- * cost and its time inside the string. Everything in it is derived from the
- * protocol's own record — category, first chain, TVL and age — never from a
- * hand-written list of protocol names.
+ * One protocol's farm plan: eight steps, each a concrete action carrying its
+ * cost and its time inside the string — the playbook's two moves, the weekly
+ * repetition, a risk step read off the record, the diary and the exit.
+ * Everything in it is derived from the protocol's own record — category,
+ * first chain, TVL and age — never from a hand-written list of protocol names.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
   const chain = firstChain(p);
@@ -334,6 +471,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
     `${book.open(p.name, chain, capital)} Cost: $${capital} of working capital plus ${gas} in gas. Time: 20 minutes.`,
     `${book.second(p.name, chain, capital)} Cost: ${gas} in gas per action. Time: 15 minutes.`,
     `Repeat one qualifying action every week for ${weeks} weeks; points and launch snapshots are taken more than once, and a wallet active in several of them outranks a one-week visitor. Cost: ${gas} in gas a week. Time: 10 minutes a week for ${weeks} weeks.`,
+    riskStep(p, age),
     `Keep the position open the whole ${weeks} weeks and log every transaction hash, date and balance in a farm diary, so the position can be proven, repeated or unwound without guesswork. Cost: nothing. Time: 5 minutes a week.`,
     `Claim only from ${p.name}'s official app, reached from its DefiLlama page — never from a search ad or a direct message, and never pay a fee to claim. Unwind in reverse order when you are done. Cost: ${gas} in gas to exit. Time: 20 minutes.`,
   ];
@@ -360,10 +498,15 @@ export interface BoardRow {
     comp_multiple: number;
     comp_peers: number;
     comp_median_multiple: number | null;
+    implied_low_usd: number;
+    implied_high_usd: number;
+    multiple_low: number;
+    multiple_high: number;
     growth_pct: number;
     growth_factor: number;
     track_factor: number;
     conviction: number;
+    plan: PlanSummary;
   };
   farm_steps: string[];
 }
@@ -395,6 +538,8 @@ export interface RadarData {
   total_implied_usd: number;
   global_comp: CompStat;
   comps: CompStat[];
+  peers: CategoryPeers[];
+  global_peers: PeerSample[];
   rows: (BoardRow & { farm_steps: string[] })[];
   live: LiveRow[];
 }
@@ -422,10 +567,15 @@ export function buildBoard(snapshot: Snapshot): { board: BoardRow[]; comps: { by
       comp_multiple: s.v.comp_multiple,
       comp_peers: s.v.comp_peers,
       comp_median_multiple: s.v.comp_median,
+      implied_low_usd: s.v.implied_low_usd,
+      implied_high_usd: s.v.implied_high_usd,
+      multiple_low: s.v.multiple_low,
+      multiple_high: s.v.multiple_high,
       growth_pct: s.v.growth_pct,
       growth_factor: s.v.growth_factor,
       track_factor: s.v.track_factor,
       conviction: s.v.conviction,
+      plan: planSummary(s.p, s.v.age_days),
     },
     farm_steps: farmSteps(s.p, s.v.age_days),
   }));
@@ -452,6 +602,7 @@ export function buildLive(snapshot: Snapshot): LiveRow[] {
 export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
   const { board, comps } = buildBoard(snapshot);
   const live = buildLive(snapshot);
+  const peerSamples = buildPeerSamples(snapshot);
   const compList = [...comps.byCategory.values()]
     .filter((c) => c.peers >= 2)
     .sort((a, b) => b.peers - a.peers)
@@ -470,6 +621,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     total_implied_usd: board.reduce((sum, r) => sum + r.implied_value_usd, 0),
     global_comp: comps.global,
     comps: compList,
+    peers: peerSamples.byCategory,
+    global_peers: peerSamples.global,
     rows: board,
     live,
   };
